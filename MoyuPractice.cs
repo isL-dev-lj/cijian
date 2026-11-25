@@ -340,6 +340,7 @@ internal sealed class PracticeWindow : Form
     private Point dragWindowOrigin;
     private bool dragging;
     private bool wasMoved;
+    private bool upgradeLegacySave;
     private bool playOnClick;
     private Rectangle graduateStar;
     private Rectangle firstPronunciationLine;
@@ -399,6 +400,16 @@ internal sealed class PracticeWindow : Form
     private bool UsingSentences { get { return SelectedDeck == Deck.Sentences; } }
     private bool UsingGraduate { get { return SelectedDeck == Deck.Graduate; } }
     private static readonly Lazy<string[][]> GraduateWords = new Lazy<string[][]>(LoadGraduateWords);
+    private static readonly Lazy<string[]> GraduateIds = new Lazy<string[]>(() =>
+        GraduateWords.Value.Select(word => Convert.ToBase64String(
+            System.Text.Encoding.UTF8.GetBytes(word[0].Trim().ToLowerInvariant()))).ToArray());
+    private static readonly Lazy<bool> IsOriginalGraduateDeck = new Lazy<bool>(() =>
+    {
+        using (var stream = typeof(PracticeWindow).Assembly.GetManifestResourceStream("GraduateFrequency.tsv"))
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+            return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "") ==
+                "39E233D50C4FB2CA9F368ADDBC32ABA02DABB3FAF46D1417173030A2DCAB8CDB";
+    });
     private string[][] CurrentDeck { get { return UsingGraduate ? GraduateWords.Value : (UsingSentences ? Sentences : Words); } }
     private int CompletedCount { get { return UsingGraduate ? graduateCompleted : (UsingSentences ? sentencesCompleted : completed); } }
     private bool IsBrushing { get { return mode.SelectedIndex == 3; } }
@@ -538,6 +549,7 @@ internal sealed class PracticeWindow : Form
             }
         };
         ShowWord(false);
+        if (upgradeLegacySave) SaveProgress();
     }
 
     public void InitializeShortcut()
@@ -1211,12 +1223,67 @@ internal sealed class PracticeWindow : Form
                 sentencesBrushed = value;
             if (lines.Length > 14 && int.TryParse(lines[14], out value) && value >= 0)
                 graduateBrushed = value;
+            if (lines.Length >= 21 && lines[15] == "graduate-ids-v1")
+                RestoreGraduateIds(lines);
+            else if (IsOriginalGraduateDeck.Value)
+                upgradeLegacySave = true;
+            else if (!IsOriginalGraduateDeck.Value &&
+                (graduateCompleted != 0 || graduateBrushed != 0 || graduateFavorites.Count != 0))
+            {
+                // Preserve the legacy file before using a different word list.
+                string backup = statePath + ".legacy";
+                if (!File.Exists(backup)) File.Copy(statePath, backup);
+                graduateFavorites.Clear();
+                graduateGroup = null;
+                graduateGroupStart = graduateNext = graduateCompleted = graduateBrushed = 0;
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
     private const int modeCount = 4;
+
+    private static string GraduateIdAt(int index)
+    {
+        return GraduateIds.Value[index % GraduateIds.Value.Length];
+    }
+
+    private static int RestoreGraduateCursor(string id, int previous)
+    {
+        var ids = GraduateIds.Value;
+        int index = Array.IndexOf(ids, id);
+        return index < 0 ? previous : previous - previous % ids.Length + index;
+    }
+
+    private void RestoreGraduateIds(string[] lines)
+    {
+        var ids = GraduateIds.Value;
+        var favorites = new System.Collections.Generic.HashSet<string>(lines[16].Split(','));
+        graduateFavorites.Clear();
+        for (int i = 0; i < ids.Length; i++)
+            if (favorites.Contains(ids[i])) graduateFavorites.Add(i);
+
+        int previousNext;
+        if (int.TryParse(lines[11], out previousNext) && previousNext >= 0) graduateNext = previousNext;
+        graduateGroupStart = RestoreGraduateCursor(lines[18], graduateGroupStart);
+        graduateNext = RestoreGraduateCursor(lines[19], graduateNext);
+        graduateBrushed = RestoreGraduateCursor(lines[20], graduateBrushed);
+        graduateGroup = null;
+        var queue = lines[17].Split(',').Select(id => Array.IndexOf(ids, id)).ToArray();
+        if (queue.Length == GraduateGroupSize)
+        {
+            var used = new System.Collections.Generic.HashSet<int>(queue.Where(i => i >= 0));
+            int candidate = graduateGroupStart % ids.Length;
+            for (int i = 0; i < queue.Length; i++)
+            {
+                if (queue[i] >= 0) continue;
+                while (!used.Add(candidate)) candidate = (candidate + 1) % ids.Length;
+                queue[i] = candidate;
+            }
+            graduateGroup = queue;
+        }
+    }
 
     private static int[] ParseGraduateIndices(string text)
     {
@@ -1243,7 +1310,10 @@ internal sealed class PracticeWindow : Form
                 graduateCompleted.ToString(), UsingGraduate.ToString(),
                 string.Join(",", graduateFavorites.OrderBy(index => index)), graduateGroupStart.ToString(),
                 graduateGroup == null ? "" : string.Join(",", graduateGroup), graduateNext.ToString(),
-                brushed.ToString(), sentencesBrushed.ToString(), graduateBrushed.ToString() });
+                brushed.ToString(), sentencesBrushed.ToString(), graduateBrushed.ToString(),
+                "graduate-ids-v1", string.Join(",", graduateFavorites.OrderBy(i => i).Select(GraduateIdAt)),
+                graduateGroup == null ? "" : string.Join(",", graduateGroup.Select(GraduateIdAt)),
+                GraduateIdAt(graduateGroupStart), GraduateIdAt(graduateNext), GraduateIdAt(graduateBrushed) });
             if (File.Exists(statePath)) File.Replace(pending, statePath, null);
             else File.Move(pending, statePath);
         }
@@ -1507,6 +1577,19 @@ internal sealed class PracticeWindow : Form
                     return 41;
                 form.ToggleGraduateFavorite();
                 if (form.graduateFavorites.Contains(1) || form.Answer != GraduateWords.Value[1][0]) return 42;
+            }
+            // Simulate an older deck whose first two words were in the opposite order.
+            var reordered = File.ReadAllLines(path);
+            reordered[8] = "0";
+            reordered[10] = string.Join(",", Enumerable.Range(0, GraduateGroupSize));
+            reordered[16] = GraduateIdAt(1);
+            reordered[17] = string.Join(",", new[] { GraduateIdAt(1), GraduateIdAt(0) }
+                .Concat(Enumerable.Range(2, GraduateGroupSize - 2).Select(GraduateIdAt)));
+            File.WriteAllLines(path, reordered);
+            using (var form = new PracticeWindow(path))
+            {
+                if (!form.graduateFavorites.Contains(1) || form.graduateFavorites.Contains(0) ||
+                    form.Answer != GraduateWords.Value[1][0]) return 63;
             }
             return 0;
         }

@@ -9,6 +9,7 @@ using System.Windows.Forms;
 internal static class CijianUpdates
 {
     private const string Channel = "https://github.com/isL-dev-lj/cijian/releases/latest";
+    private const string PublisherKey = "<RSAKeyValue><Modulus>zGhlm5JqT9ElXL1+8qDT2AjV5T+rPVukW+n1eKdN1nx0iZL0Tahvpp26Y2Ofw5K8ZNOIWzcarX+T7fTieaZV2Hgc1UahnfTZr6zoHCh7oGJL73IQ1TrULSNyfqdB21dHuCYWzwZzI9OQ4Ab3IjWred9b6lS9XFzv9LbslhmWtfJywd05DgCjgDJT9gOcKpTGsQG/rgTy6UPMaTkCERBNCehJGs5fkHiw1LhmIldIffCn8/uHvL2a++N3NSy11PGraMuns67FH9UYz/+Pv1S7Y6uMAomlAoGIhjEtJskQzTnt1oBp7T5I83M2m675rx4Wmy1LdQCN0WeOco+qpBAoSUA9cijKrFxwJ+ohORmZUYfHLOAnv1ToZg9kalCH6A6CLZFm5FeAQ3923MjDL4UvkdU5zrwg8MmnqzEJGyvIxJh7yY/29sbOzfI0JMBluChnbmXEQCKcYnX6yRwMYA+U9WuILLtTtZNsqtjlXjsRYgegJ34lzDYAsWjTBjh+dmeV</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
     private static Version CurrentVersion { get { return typeof(Program).Assembly.GetName().Version; } }
     internal static string DisplayVersion { get { return CurrentVersion.ToString(3); } }
 
@@ -68,16 +69,47 @@ internal static class CijianUpdates
 
     private static string ExtractPackage(string zipPath)
     {
+        byte[] signature = ReadPackageSignature(zipPath);
         string path = Path.Combine(Path.GetTempPath(), "Cijian-update-" + Guid.NewGuid().ToString("N") + ".exe");
         using (var archive = ZipFile.OpenRead(zipPath))
         {
             var entry = archive.GetEntry("Cijian.exe");
             if (archive.Entries.Count != 1 || entry == null || entry.Length < 1 || entry.Length > 32 * 1024 * 1024)
                 throw new InvalidDataException("更新包应该只包含一个 Cijian.exe。");
-            try { entry.ExtractToFile(path); }
+            try
+            {
+                entry.ExtractToFile(path);
+                using (var rsa = new System.Security.Cryptography.RSACryptoServiceProvider())
+                {
+                    rsa.PersistKeyInCsp = false;
+                    rsa.FromXmlString(PublisherKey);
+                    if (!rsa.VerifyData(File.ReadAllBytes(path), "SHA256", signature))
+                        throw new InvalidDataException("更新包签名无效，请重新从词间发布页下载。");
+                }
+            }
             catch { if (File.Exists(path)) File.Delete(path); throw; }
         }
         return path;
+    }
+
+    private static byte[] ReadPackageSignature(string zipPath)
+    {
+        const int signatureLength = 384;
+        const int endRecordLength = 22;
+        using (var stream = File.OpenRead(zipPath))
+        using (var reader = new BinaryReader(stream))
+        {
+            if (stream.Length >= signatureLength + endRecordLength)
+            {
+                stream.Seek(-(signatureLength + endRecordLength), SeekOrigin.End);
+                if (reader.ReadUInt32() == 0x06054b50)
+                {
+                    stream.Seek(16, SeekOrigin.Current);
+                    if (reader.ReadUInt16() == signatureLength) return reader.ReadBytes(signatureLength);
+                }
+            }
+        }
+        throw new InvalidDataException("此更新包缺少词间发布签名。");
     }
 
     private static Version ReadVersion(string path)
@@ -160,7 +192,17 @@ internal static class CijianUpdates
             ReplaceAndRestart(candidate, target, old, false);
             if (ReadVersion(target) != CurrentVersion) return 61;
             try { ReplaceAndRestart(candidate, target, CurrentVersion, false); return 62; }
-            catch (InvalidDataException) { return 0; }
+            catch (InvalidDataException) { }
+            var tampered = File.ReadAllBytes(Path.Combine(directory, "Cijian-Update.zip"));
+            tampered[tampered.Length - 1] ^= 1;
+            string tamperedPath = Path.Combine(directory, "tampered.zip");
+            File.WriteAllBytes(tamperedPath, tampered);
+            try
+            {
+                try { File.Delete(ExtractPackage(tamperedPath)); return 64; }
+                catch (InvalidDataException) { return 0; }
+            }
+            finally { File.Delete(tamperedPath); }
         }
         finally { File.Delete(candidate); }
     }
