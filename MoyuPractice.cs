@@ -10,9 +10,9 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("词间")]
 [assembly: System.Reflection.AssemblyProduct("词间")]
-[assembly: System.Reflection.AssemblyVersion("1.0.4.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.4.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.0.4")]
+[assembly: System.Reflection.AssemblyVersion("1.0.5.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.5.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.0.5")]
 
 internal static class Program
 {
@@ -401,8 +401,7 @@ internal sealed class PracticeWindow : Form
     private bool UsingGraduate { get { return SelectedDeck == Deck.Graduate; } }
     private static readonly Lazy<string[][]> GraduateWords = new Lazy<string[][]>(LoadGraduateWords);
     private static readonly Lazy<string[]> GraduateIds = new Lazy<string[]>(() =>
-        GraduateWords.Value.Select(word => Convert.ToBase64String(
-            System.Text.Encoding.UTF8.GetBytes(word[0].Trim().ToLowerInvariant()))).ToArray());
+        GraduateWords.Value.Select(WordId).ToArray());
     private static readonly Lazy<bool> IsOriginalGraduateDeck = new Lazy<bool>(() =>
     {
         using (var stream = typeof(PracticeWindow).Assembly.GetManifestResourceStream("GraduateFrequency.tsv"))
@@ -410,16 +409,46 @@ internal sealed class PracticeWindow : Form
             return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "") ==
                 "39E233D50C4FB2CA9F368ADDBC32ABA02DABB3FAF46D1417173030A2DCAB8CDB";
     });
-    private string[][] CurrentDeck { get { return UsingGraduate ? GraduateWords.Value : (UsingSentences ? Sentences : Words); } }
+    private string[][] CurrentDeck { get { return EntriesFor(SelectedDeck); } }
+    private static string[][] EntriesFor(Deck deck)
+    {
+        return deck == Deck.Graduate ? GraduateWords.Value : (deck == Deck.Sentences ? Sentences : Words);
+    }
+
+    private static string WordId(string[] entry)
+    {
+        return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(entry[0].Trim().ToLowerInvariant()));
+    }
     private int CompletedCount { get { return UsingGraduate ? graduateCompleted : (UsingSentences ? sentencesCompleted : completed); } }
     private bool IsBrushing { get { return mode.SelectedIndex == 3; } }
+    private const int HintReviewDelay = 3;
+    private sealed class HintReview
+    {
+        public Deck Deck;
+        public int WordIndex;
+        public long DueAfter;
+    }
+    private readonly System.Collections.Generic.List<HintReview> hintReviews =
+        new System.Collections.Generic.List<HintReview>();
+    private HintReview currentReview;
+    private bool usedHint;
     private string[] CurrentWord { get { return WordAt(0); } }
     private string[] WordAt(int offset)
     {
+        return CurrentDeck[WordIndexAt(offset)];
+    }
+
+    private int WordIndexAt(int offset)
+    {
         var deck = CurrentDeck;
-        if (UsingGraduate) return deck[GraduateIndex(offset)];
+        if (currentReview != null)
+        {
+            if (offset == 0) return currentReview.WordIndex;
+            offset--;
+        }
+        if (UsingGraduate) return GraduateIndex(offset);
         int count = CurrentCount;
-        return deck[(count % deck.Length + offset) % deck.Length];
+        return (count % deck.Length + offset) % deck.Length;
     }
 
     private string GraduateProgress
@@ -452,7 +481,7 @@ internal sealed class PracticeWindow : Form
 
     private void ToggleGraduateFavorite()
     {
-        int index = GraduateIndex(0);
+        int index = WordIndexAt(0);
         if (!graduateFavorites.Add(index)) graduateFavorites.Remove(index);
         SaveProgress();
         Invalidate();
@@ -659,7 +688,7 @@ internal sealed class PracticeWindow : Form
         secondPronunciationLine = Rectangle.Empty;
         if (UsingGraduate)
         {
-            bool starred = graduateFavorites.Contains(GraduateIndex(0));
+            bool starred = graduateFavorites.Contains(WordIndexAt(0));
             int starLeft = 27 + TextWidth(graphics, ghost, spellingFont);
             graduateStar = new Rectangle(starLeft, 9, 30, 29);
             DrawText(graphics, starred ? "★" : "☆", queueFont, graduateStar,
@@ -769,7 +798,7 @@ internal sealed class PracticeWindow : Form
         DrawText(graphics, currentText, queueFont, Rectangle.Inflate(current, -8, 0), Color.White);
         int upcomingSpace = strip.Width - currentWidth - 12;
         int previewCount = UsingGraduate && !IsBrushing
-            ? Math.Min(QueueLength - 1, GraduateGroupSize - GraduatePosition - 1)
+            ? Math.Min(QueueLength - 1, GraduateGroupSize - GraduatePosition - (currentReview == null ? 1 : 0))
             : QueueLength - 1;
         var upcoming = Enumerable.Range(1, previewCount)
             .Select(offset => (offset + 1) + ". " + WordAt(offset)[0]).ToArray();
@@ -891,11 +920,17 @@ internal sealed class PracticeWindow : Form
         }
         if (key == Keys.Tab && input.Focused && (mode.SelectedIndex == 1 || mode.SelectedIndex == 2))
         {
-            if (result == Result.Pending && input.TextLength < Answer.Length)
-                input.AppendText(Answer[input.TextLength].ToString());
+            ApplyHint();
             return true;
         }
         return base.ProcessCmdKey(ref message, key);
+    }
+
+    private void ApplyHint()
+    {
+        if (result != Result.Pending || input.TextLength >= Answer.Length) return;
+        usedHint = true;
+        input.AppendText(Answer[input.TextLength].ToString());
     }
 
     protected override void OnFormClosing(FormClosingEventArgs args)
@@ -954,6 +989,10 @@ internal sealed class PracticeWindow : Form
 
     private void ShowWord(bool readAloud)
     {
+        usedHint = false;
+        currentReview = mode.SelectedIndex == 1 || mode.SelectedIndex == 2
+            ? hintReviews.FirstOrDefault(review => review.Deck == SelectedDeck && review.DueAfter <= CompletedCount)
+            : null;
         ResetInput("");
         if (readAloud && automatic.Checked) Speak();
     }
@@ -1005,6 +1044,7 @@ internal sealed class PracticeWindow : Form
         string deckName = UsingGraduate ? "考研词频" : (UsingSentences ? "句子" : "词库");
         string progress = UsingGraduate && !IsBrushing ? GraduateProgress :
             deckName + " · 已完成 " + CurrentCount;
+        if (currentReview != null) progress += " · 提示回练";
         status.Text = message ?? (progress + " 次  ·  " + keys + hint);
         Invalidate();
     }
@@ -1047,6 +1087,27 @@ internal sealed class PracticeWindow : Form
             return;
         }
         if (result != Result.Correct) return;
+        int index = WordIndexAt(0);
+        bool reviewing = currentReview != null;
+        if (reviewing) hintReviews.Remove(currentReview);
+        if (usedHint)
+        {
+            var waiting = hintReviews.FirstOrDefault(review => review.Deck == SelectedDeck && review.WordIndex == index);
+            if (waiting == null)
+            {
+                waiting = new HintReview { Deck = SelectedDeck, WordIndex = index };
+                hintReviews.Add(waiting);
+            }
+            waiting.DueAfter = (long)CompletedCount + HintReviewDelay + (reviewing ? 0 : 1);
+        }
+        if (!reviewing) AdvanceDeck();
+        ShowWord(false);
+        SaveProgress();
+        if (allowSpeech && Visible && automatic.Checked) Speak();
+    }
+
+    private void AdvanceDeck()
+    {
         if (UsingGraduate)
         {
             if (IsBrushing) graduateBrushed++;
@@ -1068,9 +1129,6 @@ internal sealed class PracticeWindow : Form
         }
         else if (IsBrushing) brushed++;
         else completed++;
-        ShowWord(false);
-        SaveProgress();
-        if (allowSpeech && Visible && automatic.Checked) Speak();
     }
 
     private void Speak()
@@ -1237,12 +1295,31 @@ internal sealed class PracticeWindow : Form
                 graduateGroup = null;
                 graduateGroupStart = graduateNext = graduateCompleted = graduateBrushed = 0;
             }
+            if (lines.Length > 21) RestoreHintReviews(lines[21]);
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
     private const int modeCount = 4;
+
+    private void RestoreHintReviews(string saved)
+    {
+        foreach (string item in saved.Split(','))
+        {
+            var parts = item.Split(':');
+            int deckIndex;
+            long due;
+            if (parts.Length != 3 || !int.TryParse(parts[0], out deckIndex) ||
+                deckIndex < 0 || deckIndex > (int)Deck.Graduate ||
+                !long.TryParse(parts[2], out due) || due < 0) continue;
+            Deck deck = (Deck)deckIndex;
+            int index = deck == Deck.Graduate ? Array.IndexOf(GraduateIds.Value, parts[1]) :
+                Array.FindIndex(EntriesFor(deck), entry => WordId(entry) == parts[1]);
+            if (index >= 0 && !hintReviews.Any(review => review.Deck == deck && review.WordIndex == index))
+                hintReviews.Add(new HintReview { Deck = deck, WordIndex = index, DueAfter = due });
+        }
+    }
 
     private static string GraduateIdAt(int index)
     {
@@ -1313,7 +1390,9 @@ internal sealed class PracticeWindow : Form
                 brushed.ToString(), sentencesBrushed.ToString(), graduateBrushed.ToString(),
                 "graduate-ids-v1", string.Join(",", graduateFavorites.OrderBy(i => i).Select(GraduateIdAt)),
                 graduateGroup == null ? "" : string.Join(",", graduateGroup.Select(GraduateIdAt)),
-                GraduateIdAt(graduateGroupStart), GraduateIdAt(graduateNext), GraduateIdAt(graduateBrushed) });
+                GraduateIdAt(graduateGroupStart), GraduateIdAt(graduateNext), GraduateIdAt(graduateBrushed),
+                string.Join(",", hintReviews.Select(review => (int)review.Deck + ":" +
+                    WordId(EntriesFor(review.Deck)[review.WordIndex]) + ":" + review.DueAfter)) });
             if (File.Exists(statePath)) File.Replace(pending, statePath, null);
             else File.Move(pending, statePath);
         }
@@ -1590,6 +1669,32 @@ internal sealed class PracticeWindow : Form
             {
                 if (!form.graduateFavorites.Contains(1) || form.graduateFavorites.Contains(0) ||
                     form.Answer != GraduateWords.Value[1][0]) return 63;
+            }
+            using (var form = new PracticeWindow(path))
+            {
+                form.SelectDeck(Deck.Words);
+                form.SelectMode(2);
+                string hinted = form.Answer;
+                form.ApplyHint();
+                form.input.Text = hinted;
+                form.FinishFeedback();
+                if (form.hintReviews.Count != 1 || form.currentReview != null) return 65;
+                for (int i = 0; i < HintReviewDelay; i++)
+                {
+                    if (form.currentReview != null) return 66;
+                    form.input.Text = form.Answer;
+                    form.FinishFeedback();
+                }
+                if (form.Answer != hinted || form.currentReview == null) return 67;
+            }
+            using (var form = new PracticeWindow(path))
+            {
+                int beforeReview = form.CompletedCount;
+                if (form.currentReview == null || !form.status.Text.Contains("提示回练")) return 68;
+                form.input.Text = form.Answer;
+                form.FinishFeedback();
+                if (form.CompletedCount != beforeReview || form.hintReviews.Count != 0 ||
+                    form.currentReview != null) return 69;
             }
             return 0;
         }
