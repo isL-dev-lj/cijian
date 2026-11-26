@@ -10,9 +10,9 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("词间")]
 [assembly: System.Reflection.AssemblyProduct("词间")]
-[assembly: System.Reflection.AssemblyVersion("1.0.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.5.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.0.5")]
+[assembly: System.Reflection.AssemblyVersion("1.0.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.6.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.0.6")]
 
 internal static class Program
 {
@@ -496,6 +496,23 @@ internal sealed class PracticeWindow : Form
         }
     }
 
+    private static readonly System.Collections.Generic.Dictionary<string, string> GraduateGlossCorrections =
+        new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "be", "v. 是；在；存在。作助动词构成进行时或被动语态。" },
+            { "do", "v. 做；进行；完成。作助动词构成疑问、否定或强调。" },
+            { "use", "v. 使用；利用。n. 使用；用途；用法。" },
+            { "write", "v. 写；写信；撰写。" },
+            { "accord", "n. 协议；一致。v. 给予；与……一致。in accordance with 按照。" },
+            { "number", "n. 数字；数量；号码。v. 编号；总计。a number of 许多。" },
+            { "mean", "v. 意味着；意思是；打算。adj. 刻薄的；吝啬的；平均的。n. 平均值。" },
+            { "pay", "v. 支付；偿还；值得。n. 工资；薪酬。pay attention to 注意。" },
+            { "rule", "n. 规则；规定。v. 统治；裁定。rule out 排除。" },
+            { "seem", "v. 似乎；好像。seem to do 似乎做……；it seems that… 似乎……。" },
+            { "term", "n. 术语；期限；学期；任期；条件（常用复数）。v. 把……称为。in terms of 就……而言。" },
+            { "account", "n. 账户；账目；叙述。v. 解释；占（见 account for）；认为。take into account 把……考虑在内。" }
+        };
+
     private static string[][] LoadGraduateWords()
     {
         using (var reader = new StreamReader(typeof(PracticeWindow).Assembly.GetManifestResourceStream("GraduateFrequency.tsv")))
@@ -506,7 +523,12 @@ internal sealed class PracticeWindow : Form
             {
                 int tab = line.IndexOf('\t');
                 if (tab > 0 && tab < line.Length - 1)
-                    words.Add(new[] { line.Substring(0, tab), "", line.Substring(tab + 1) });
+                {
+                    string word = line.Substring(0, tab);
+                    string gloss;
+                    if (!GraduateGlossCorrections.TryGetValue(word, out gloss)) gloss = line.Substring(tab + 1);
+                    words.Add(new[] { word, "", gloss });
+                }
             }
             return words.ToArray();
         }
